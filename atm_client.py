@@ -5,7 +5,7 @@ from Crypto.Util.Padding import pad, unpad
 import hashlib
 import base64
 
-key = "client_key"
+key = "key"
 
 def encrypt(message, key):
     key = hashlib.sha256(key.encode()).digest()
@@ -13,12 +13,23 @@ def encrypt(message, key):
     ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
     iv = base64.b64encode(cipher.iv).decode('utf-8')
     ct = base64.b64encode(ct_bytes).decode('utf-8')
-    return iv + ct
+    return iv + ":" + ct
 
 def decrypt(encrypted_message, key):
     temp_key = hashlib.sha256(key.encode()).digest()
-    iv = base64.b64decode(encrypted_message[:24])
-    ct = base64.b64decode(encrypted_message[24:])
+
+    print(f"Decrypting message: {repr(encrypted_message)}")
+
+    try:
+        iv_b64, ct_b64 = encrypted_message.split(":")
+        iv = base64.b64decode(iv_b64)
+        ct = base64.b64decode(ct_b64)
+    except ValueError:
+        raise ValueError("Invalid encrypted message format. Expected 'iv:ct' format.")
+    
+    if len(iv) != 16:
+        raise ValueError("Invalid IV length. Expected 16 bytes.")
+    
     cipher = AES.new(temp_key, AES.MODE_CBC, iv)
     message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
     return message
@@ -43,10 +54,15 @@ def send_request(client, request, key):
         
         # Receive the encrypted response
         response = client.recv(1024).decode()
+        print(f"From server: {repr(response)}")
+
+        if not response:
+            raise ValueError("Empty response from server.")
+
         decrypted_response = decrypt(response, key)
         return json.loads(decrypted_response)
-    except (socket.error, json.JSONDecodeError):
-        print("Error communicating with server")
+    except (socket.error, json.JSONDecodeError, ValueError) as e:
+        print(f"Error communicating with server: {e}")
         return {"status": "error", "message": "Server communication error."}
 
 def login_action(client, username):
