@@ -1,5 +1,27 @@
 import socket
 import json
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import hashlib
+import base64
+
+key = "client_key"
+
+def encrypt(message, key):
+    key = hashlib.sha256(key.encode()).digest()
+    cipher = AES.new(key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
+    iv = base64.b64encode(cipher.iv).decode('utf-8')
+    ct = base64.b64encode(ct_bytes).decode('utf-8')
+    return iv + ct
+
+def decrypt(encrypted_message, key):
+    temp_key = hashlib.sha256(key.encode()).digest()
+    iv = base64.b64decode(encrypted_message[:24])
+    ct = base64.b64decode(encrypted_message[24:])
+    cipher = AES.new(temp_key, AES.MODE_CBC, iv)
+    message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
+    return message
 
 def connect_to_server():
     host = 'localhost'
@@ -14,22 +36,20 @@ def connect_to_server():
         print("Connection to server failed. Please ensure the server is running.")
         return None
 
-def send_request(request):
-    client = connect_to_server()
-    if not client:
-        return {"status": "error", "message": "Unable to connect to server."}
-    
+def send_request(client, request, key):
     try:
-        client.send(json.dumps(request).encode())
+        encrypted_request = encrypt(json.dumps(request), key)
+        client.send(encrypted_request.encode())
+        
+        # Receive the encrypted response
         response = client.recv(1024).decode()
-        return json.loads(response)
+        decrypted_response = decrypt(response, key)
+        return json.loads(decrypted_response)
     except (socket.error, json.JSONDecodeError):
         print("Error communicating with server")
         return {"status": "error", "message": "Server communication error."}
-    finally:
-        client.close()
 
-def login_action(username):
+def login_action(client, username):
     while True:
         action = input("Choose action: [deposit/withdraw/check_balance/exit]: ").strip().lower()
         if action == "exit":
@@ -39,6 +59,7 @@ def login_action(username):
             print("Invalid option.")
             continue
 
+        amount = None
         if action in["deposit", "withdraw"]:
             try:
                 amount = float(input("Enter amount: ").strip())
@@ -48,9 +69,6 @@ def login_action(username):
             except ValueError:
                 print("Invalid amount. Please enter a valid number.")
                 continue
-        else:
-            # For check_balance, we don't need an amount
-            amount = None
 
         request = {
             "action": action,
@@ -58,7 +76,7 @@ def login_action(username):
             "amount": amount
         }
 
-        response = send_request(request)
+        response = send_request(client, request, key)
         print(response.get('message', 'No message from server.'))
         
 
@@ -72,7 +90,7 @@ def handle_user_action(client, action):
         "password": password
     }
 
-    response = send_request(request)
+    response = send_request(client, request, key)
 
     if response.get('status') == "success":
         print(response.get("message", "Success."))
@@ -86,7 +104,7 @@ def handle_user_action(client, action):
         elif action == "login":
             print("Login successful.")
             print("Welcome to your account!")
-            login_action(username)
+            login_action(client, username)
     return client
 
 
