@@ -2,6 +2,12 @@ import socket
 import threading
 import json
 import logging
+import bcrypt
+from cryptography.fernet import Fernet
+from datetime import datetime
+
+bank_server_key = Fernet.generate_key()
+cipher = Fernet(bank_server_key)
 
 customers = {
     "timmy ngo": {
@@ -13,13 +19,33 @@ customers = {
 
 lock = threading.Lock()
 
-# logging configuration
+# Audit log configuration
 logging.basicConfig(
     filename="audit.log",
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    format="%(message)s"
 )
+
+# Security protocols
+def encrypt(message):
+    return cipher.encrypt(message.encode()).decode()
+
+def decrypt(encrypted_message):
+    return cipher.decrypt(encrypted_message.encode()).decode()
+
+def log_audit(customer_id, action):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"{customer_id}, {action}, {timestamp}"
+    encrypted_log = encrypt(log_entry)
+
+    with open("audit.log", "a") as log_file:
+        log_file.write(encrypted_log + "\n")
+
+def hash(message):
+    return bcrypt.hashpw(message.encode(), bcrypt.gensalt()).decode()
+
+def verify_hash(message, hashed):
+    return bcrypt.checkpw(message.encode(), hashed.encode())
 
 def handle_client(conn, addr):
     logging.info(f"New connection from {addr}")
@@ -69,7 +95,7 @@ def handle_register(username, password):
             logging.warning(f"Registration failed for user: {username} - Username already exists.")
             return {"status": "fail", "message": "Username already exists."}
         customers[username] = {
-            "password": password,
+            "password": hash(password),
             "balance": 0,
             "transactions": []
         }
@@ -92,7 +118,7 @@ def handle_deposit(username, amount):
         if username in customers:
             customers[username]["balance"] += amount
             customers[username]["transactions"].append(f"deposit {amount}")
-            logging.info(f"User {username} deposited ${amount}. New balance: ${customers[username]['balance']}")
+            log_audit(username, f"deposit {amount}")
             return {"status": "success", "message": f"Deposited ${amount}. New balance: ${customers[username]['balance']}"}
     return {"status": "fail", "message": "Username not found."}
 
@@ -103,7 +129,7 @@ def handle_withdraw(username, amount):
         if username in customers and customers[username]["balance"] >= amount:
             customers[username]["balance"] -= amount
             customers[username]["transactions"].append(f"withdraw {amount}")
-            logging.info(f"User {username} withdrew ${amount}. New balance: ${customers[username]['balance']}")
+            log_audit(username, f"withdraw {amount}")
             return {"status": "success", "message": f"Withdrew ${amount}. New balance: ${customers[username]['balance']}"}
     return {"status": "fail", "message": "Invalid withdrawal request."}
 
@@ -111,7 +137,7 @@ def handle_check_balance(username):
     with lock:
         if username in customers:
             balance = customers[username]["balance"]
-            logging.info(f"User {username} checked balance: ${balance}")
+            log_audit(username, "Balance Inquiry")
             return {"status": "success", "message": f"Your balance is ${balance}."}
     return {"status": "fail", "message": "User not found."}
 
