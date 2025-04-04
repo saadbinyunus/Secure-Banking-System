@@ -5,13 +5,33 @@ import logging
 import bcrypt
 from cryptography.fernet import Fernet
 from datetime import datetime
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import base64
+import hashlib
+import hmac
+import os
 
-bank_server_key = Fernet.generate_key()
-cipher = Fernet(bank_server_key)
+bank_server_key = "key"
+# cipher = Fernet(bank_server_key)
+psk = b"key"
+handshake_state = {}
+
+def hmac_sha256(key: bytes, msg: bytes):
+    return hmac.new(key, msg, hashlib.sha256).digest()
+
+def generate_nonce():
+    return os.urandom(16)
+
+def to_b64(data):
+    return base64.b64encode(data).decode()
+
+def from_b64(data):
+    return base64.b64decode(data)
 
 customers = {
     "timmy ngo": {
-        "password": "123",
+        "password": bcrypt.hashpw("123".encode(), bcrypt.gensalt()).decode(),
         "balance": 1000,
         "transactions": ["deposit 100", "withdraw 20"]
     }
@@ -28,10 +48,38 @@ logging.basicConfig(
 
 # Security protocols
 def encrypt(message):
-    return cipher.encrypt(message.encode()).decode()
+    if not isinstance(message, str):
+        message = json.dumps(message)
+
+    print(f"Encrypting message: {repr(message)}")
+    key = hashlib.sha256(bank_server_key.encode()).digest()
+    cipher = AES.new(key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
+    iv_b64 = base64.b64encode(cipher.iv).decode('utf-8')
+    ct_b64 = base64.b64encode(ct_bytes).decode('utf-8')
+
+    encrypted_message = f"{iv_b64}:{ct_b64}"
+    print(f"Encrypted message: {repr(encrypted_message)}")
+    return encrypted_message
+
 
 def decrypt(encrypted_message):
-    return cipher.decrypt(encrypted_message.encode()).decode()
+    try:
+        print(f"Encrypted message: {repr(encrypted_message)}")
+        iv_b64, ct_b64 = encrypted_message.split(":")
+        iv = base64.b64decode(iv_b64)
+        ct = base64.b64decode(ct_b64)
+
+        key = hashlib.sha256(bank_server_key.encode()).digest()
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted_message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
+
+        print(f"Decrypted message: {repr(decrypted_message)}")
+        return decrypted_message
+    except Exception as e:
+        print(f"[ERROR] Decryption failed: {e}")
+        return ""
+    
 
 def log_audit(customer_id, action):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -58,16 +106,30 @@ def handle_client(conn, addr):
                 print(f"[DISCONNECTED] {addr} disconnected.")
                 break
 
-            print(f"[RECEIVED] {data} from {addr}")
+            print(f"[RECEIVED] {repr(data)} from {addr}")
+
+            # Decrypt data to parse the JSON
+            decrypted_data = decrypt(data)
+            if not decrypted_data:
+                print(f"[ERROR] Failed to decrypt data from {addr}.")
+                conn.send(encrypt(json.dumps({"status": "fail", "message": "Decryption failed."})).encode())
+                return
+            
+            print(f"[DECRYPTED] {repr(decrypted_data)} from {addr}")
 
             # Parse the incoming JSON data
-            request = json.loads(data)
+            request = json.loads(decrypted_data)
             action = request.get("action")
             username = request.get("username")
             password = request.get("password")
 
             response = handle_action(action, username, password, request)
-            conn.send(json.dumps(response).encode())
+            response_message = json.dumps(response)
+            encrypted_response = encrypt(response_message)
+
+            print(f"[SENDING] {repr(encrypted_response)} to {addr}")
+
+            conn.send(encrypted_response.encode())
     except Exception as e:
         print(f"[ERROR] {e}")
     finally:
@@ -84,6 +146,35 @@ def handle_action(action, username, password, request):
         return handle_withdraw(username, request.get("amount"))
     elif action == "check_balance":
         return handle_check_balance(username)
+    elif action == "akdp_step1":
+        nonce1 = from_b64(request["nonce1"])
+        nonce2 = generate_nonce()
+        handshake_state[username] = {"nonce1": nonce1, "nonce2": nonce2}
+        server_hmac = hmac_sha256(psk, nonce1 + nonce2 + b"SERVER")
+
+        print(f"[AKDP] Step 1 from {username}")
+        return {
+            "action": "akdp_step2",
+            "nonce2": to_b64(nonce2),
+            "server_hmac": to_b64(server_hmac)
+        }
+
+    elif action == "akdp_confirm":
+        client_hmac = from_b64(request["client_hmac"])
+        state = handshake_state.get(username)
+        if not state:
+            return {"status": "fail", "message": "Missing handshake"}
+
+        nonce1, nonce2 = state["nonce1"], state["nonce2"]
+        master_secret = hmac_sha256(psk, nonce1 + nonce2)
+        expected = hmac_sha256(master_secret, b"CONFIRM")
+
+        if client_hmac != expected:
+            return {"status": "fail", "message": "Client verification failed"}
+
+        print(f"[AKDP] Key exchange complete for {username}")
+        return {"status": "success", "message": "Key exchange complete"}
+
     else:
         logging.error(f"Unknown action: {action}")
         return {"status": "fail", "message": "Unknown action."}
@@ -105,7 +196,7 @@ def handle_register(username, password):
 def handle_login(username, password):
     with lock:
         logging.info(f"Login attempt for user: {username}")
-        if username in customers and customers[username]["password"] == password:
+        if username in customers and verify_hash(password, customers[username]["password"]):
             logging.info(f"User {username} logged in successfully.")
             return {"status": "success", "message": "Login successful."}
         logging.warning(f"Failed login attempt for user: {username}")
