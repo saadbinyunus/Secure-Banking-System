@@ -2,18 +2,20 @@ import socket
 import threading
 import json
 import logging
-import bcrypt
-from cryptography.fernet import Fernet
+import bcrypt # type: ignore
+from cryptography.fernet import Fernet # type: ignore
 from datetime import datetime
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
+from Crypto.Cipher import AES # type: ignore
+from Crypto.Util.Padding import pad, unpad # type: ignore
 import base64
 import hashlib
 import hmac
 import os
+import tkinter as tk
+from tkinter.scrolledtext import ScrolledText
+import sys
 
 bank_server_key = "key"
-# cipher = Fernet(bank_server_key)
 psk = b"key"
 handshake_state = {}
 
@@ -30,7 +32,7 @@ def from_b64(data):
     return base64.b64decode(data)
 
 customers = {
-    "timmy ngo": {
+    "johnsmith416": {
         "password": bcrypt.hashpw("123".encode(), bcrypt.gensalt()).decode(),
         "balance": 1000,
         "transactions": ["deposit 100", "withdraw 20"]
@@ -46,7 +48,6 @@ logging.basicConfig(
     format="%(message)s"
 )
 
-# Security protocols
 def encrypt(message):
     if not isinstance(message, str):
         message = json.dumps(message)
@@ -59,13 +60,13 @@ def encrypt(message):
     ct_b64 = base64.b64encode(ct_bytes).decode('utf-8')
 
     encrypted_message = f"{iv_b64}:{ct_b64}"
-    print(f"Encrypted message: {repr(encrypted_message)}")
+    # print(f"Encrypted message: {repr(encrypted_message)}")
     return encrypted_message
 
 
 def decrypt(encrypted_message):
     try:
-        print(f"Encrypted message: {repr(encrypted_message)}")
+        # print(f"Encrypted message: {repr(encrypted_message)}")
         iv_b64, ct_b64 = encrypted_message.split(":")
         iv = base64.b64decode(iv_b64)
         ct = base64.b64decode(ct_b64)
@@ -74,7 +75,7 @@ def decrypt(encrypted_message):
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted_message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
 
-        print(f"Decrypted message: {repr(decrypted_message)}")
+        # print(f"Decrypted message: {repr(decrypted_message)}")
         return decrypted_message
     except Exception as e:
         print(f"[ERROR] Decryption failed: {e}")
@@ -96,8 +97,8 @@ def verify_hash(message, hashed):
     return bcrypt.checkpw(message.encode(), hashed.encode())
 
 def handle_client(conn, addr):
-    logging.info(f"New connection from {addr}")
-    print(f"[NEW CONNECTION] {addr} connected.")
+    # logging.info(f"New connection from {addr}") type: ignore
+    # print(f"[NEW CONNECTION] {addr} connected.")
 
     try:
         while True:
@@ -137,15 +138,15 @@ def handle_client(conn, addr):
 
 def handle_action(action, username, password, request):
     if action == "register":
-        return handle_register(username, password)
+        return register(username, password)
     elif action == "login":
-        return handle_login(username, password)
+        return login(username, password)
     elif action == "deposit":
-        return handle_deposit(username, request.get("amount"))
+        return deposit(username, request.get("amount"))
     elif action == "withdraw":
-        return handle_withdraw(username, request.get("amount"))
+        return withdraw(username, request.get("amount"))
     elif action == "check_balance":
-        return handle_check_balance(username)
+        return check_balance(username)
     elif action == "akdp_step1":
         nonce1 = from_b64(request["nonce1"])
         nonce2 = generate_nonce()
@@ -166,8 +167,8 @@ def handle_action(action, username, password, request):
             return {"status": "fail", "message": "Missing handshake"}
 
         nonce1, nonce2 = state["nonce1"], state["nonce2"]
-        master_secret = hmac_sha256(psk, nonce1 + nonce2)
-        expected = hmac_sha256(master_secret, b"CONFIRM")
+        root_secret = hmac_sha256(psk, nonce1 + nonce2)
+        expected = hmac_sha256(root_secret, b"CONFIRM")
 
         if client_hmac != expected:
             return {"status": "fail", "message": "Client verification failed"}
@@ -179,7 +180,7 @@ def handle_action(action, username, password, request):
         logging.error(f"Unknown action: {action}")
         return {"status": "fail", "message": "Unknown action."}
 
-def handle_register(username, password):
+def register(username, password):
     with lock:
         logging.info(f"Registration attempt for user: {username}")
         if username in customers:
@@ -193,7 +194,7 @@ def handle_register(username, password):
         logging.info(f"Username {username} registered successfully.")
         return {"status": "success", "message": "Registration successful."}
 
-def handle_login(username, password):
+def login(username, password):
     with lock:
         logging.info(f"Login attempt for user: {username}")
         if username in customers and verify_hash(password, customers[username]["password"]):
@@ -202,7 +203,7 @@ def handle_login(username, password):
         logging.warning(f"Failed login attempt for user: {username}")
         return {"status": "fail", "message": "Invalid credentials."}
 
-def handle_deposit(username, amount):
+def deposit(username, amount):
     if not isinstance(amount, (int, float)) or amount <= 0:
         return {"status": "fail", "message": "Invalid deposit amount."}
     with lock:
@@ -213,7 +214,7 @@ def handle_deposit(username, amount):
             return {"status": "success", "message": f"Deposited ${amount}. New balance: ${customers[username]['balance']}"}
     return {"status": "fail", "message": "Username not found."}
 
-def handle_withdraw(username, amount):
+def withdraw(username, amount):
     if not isinstance(amount, (int, float)) or amount <= 0:
         return {"status": "fail", "message": "Invalid withdrawal amount."}
     with lock:    
@@ -224,7 +225,7 @@ def handle_withdraw(username, amount):
             return {"status": "success", "message": f"Withdrew ${amount}. New balance: ${customers[username]['balance']}"}
     return {"status": "fail", "message": "Invalid withdrawal request."}
 
-def handle_check_balance(username):
+def check_balance(username):
     with lock:
         if username in customers:
             balance = customers[username]["balance"]
@@ -234,7 +235,7 @@ def handle_check_balance(username):
 
 def start_server():
     host = 'localhost'
-    port = 5555
+    port = 1
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((host, port))
@@ -245,7 +246,58 @@ def start_server():
         conn, addr = server.accept()
         thread = threading.Thread(target=handle_client, args=(conn, addr))
         thread.start()
-        print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+        # print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+
+""" 
+GUI STARTS HERE ---------------------------------------
+"""
+class GUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Secure Banking System - Bank Server")
+        self.root.geometry("1000x700")
+
+        # Terminal
+        self.output_label = tk.Label(root, text="Terminal", font=("Arial", 12, "bold"))
+        self.output_area = ScrolledText(root, height=15, bg="black", fg="white")
+        self.output_label.pack()
+        self.output_area.pack(fill="both", expand=True)
+
+        # Audit log
+        self.audit_label = tk.Label(root, text="Audit Log", font=("Arial", 12, "bold"))
+        self.audit_area = ScrolledText(root, height=15, bg="black", fg="white")
+        self.audit_label.pack()
+        self.audit_area.pack(fill="both", expand=True)
+
+        # Redirect stdout
+        sys.stdout = self
+        self.refresh_audit_log()
+
+    def write(self, message):
+        self.output_area.insert(tk.END, message)
+        self.output_area.see(tk.END)
+
+    def refresh_audit_log(self):
+        try:
+            current_pos = self.audit_area.yview() # Get scroll position
+            at_bottom = current_pos[1] == 1  # Check if scrolled to bottom
+
+            with open("audit.log", "r") as log_file:
+                log_content = log_file.read()
+
+            self.audit_area.delete(1.0, tk.END)
+            self.audit_area.insert(tk.END, log_content)
+
+            # Stay at bottom
+            if at_bottom:
+                self.audit_area.see(tk.END)
+        except FileNotFoundError:
+            self.audit_area.insert(tk.END, "No audit.log file found.\n")
+
+        self.root.after(2000, self.refresh_audit_log)
 
 if __name__ == "__main__":
-    start_server()
+    root = tk.Tk()
+    gui = GUI(root)
+    threading.Thread(target=start_server, daemon=True).start()
+    root.mainloop()
