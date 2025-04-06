@@ -17,6 +17,7 @@ import os
 bank_server_key = "secure_bank_key_123!"
 psk = b"pre_shared_key_456$"
 handshake_state = {}
+active_sessions = {}
 
 # Debug settings
 DEBUG = True
@@ -250,69 +251,99 @@ def handle_client(conn, addr):
     username = None
     
     try:
+        # Set timeout to prevent hanging connections
+        #conn.settimeout(30)  # 30 seconds timeout
+        
         while True:
-            data = conn.recv(1024).decode()
-            if not data:
-                debug_log(f"{addr} disconnected")
-                break
-
-            debug_log(f"Received raw data: {data[:100]}...")
-
-            # Reset username for each new message
-            current_username = None
-            enc_key = hashlib.sha256(bank_server_key.encode()).digest()
-            mac_key = hashlib.sha256(bank_server_key.encode()).digest()
-            debug_log("Defaulting to pre-shared key")
-
             try:
-                # First try with pre-shared key (for new connections)
-                decrypted_data = verify_and_decrypt(data, enc_key, mac_key)
-                if decrypted_data:
-                    request = json.loads(decrypted_data)
-                    current_username = request.get("username")
-                    
-                    # For existing sessions, try with session keys if available
-                    if (current_username and 
-                        current_username in handshake_state and
-                        handshake_state[current_username].get("authenticated") and
-                        handshake_state[current_username].get("conn") == conn and
-                        request.get("action") not in ["register", "login", "akdp_step1"]):
-                        
-                        enc_key = handshake_state[current_username]["enc_key"]
-                        mac_key = handshake_state[current_username]["mac_key"]
-                        debug_log(f"Switched to session keys for {current_username}")
-                        # Re-decrypt with session keys
-                        decrypted_data = verify_and_decrypt(data, enc_key, mac_key)
-                        if not decrypted_data:
-                            raise ValueError("Session key decryption failed")
+                data = conn.recv(1024)
+                if not data:
+                    debug_log(f"{addr} disconnected gracefully")
+                    break
 
-                    request = json.loads(decrypted_data)
-                    request["conn"] = conn
-                    username = current_username
+                debug_log(f"Received raw data: {data[:100]}...")
 
-                    response = handle_action(request["action"], username, 
-                                          request.get("password"), request)
+                # Find username for this connection
+                username = None
+                for user, state in handshake_state.items():
+                    if state.get("conn") == conn:
+                        username = user
+                        break
+
+                # Get appropriate keys
+                if username and username in handshake_state and handshake_state[username].get("authenticated"):
+                    enc_key = handshake_state[username]["enc_key"]
+                    mac_key = handshake_state[username]["mac_key"]
+                    debug_log(f"Using session keys for {username}")
+                else:
+                    enc_key = hashlib.sha256(bank_server_key.encode()).digest()
+                    mac_key = hashlib.sha256(bank_server_key.encode()).digest()
+                    debug_log("Using pre-shared key")
+
+                decrypted_data = verify_and_decrypt(data.decode(), enc_key, mac_key)
+                if not decrypted_data:
+                    log_audit("SECURITY", f"MAC_VERIFICATION_FAILED, {addr[0]}:{addr[1]}")
+                    debug_log("Security violation - closing connection")
+                    raise SecurityException("MAC verification failed")
+
+                try:
+                    request = json.loads(decrypted_data)
+                    request["conn"] = conn  # Store connection reference
+                    username = request.get("username")
+                    action = request.get("action")
+                    password = request.get("password")
+
+                    if not all([action, username]):
+                        raise ValueError("Missing required fields")
+
+                    response = handle_action(action, username, password, request)
                     response_message = json.dumps(response)
                     secured_response = encrypt_and_sign(response_message, enc_key, mac_key)
-                    conn.send(secured_response.encode())
-                else:
-                    raise ValueError("Initial decryption failed")
+                    conn.sendall(secured_response.encode())
 
-            except Exception as e:
-                debug_log(f"Message handling error: {str(e)}")
-                log_audit("SYSTEM", f"MESSAGE_ERROR, {addr[0]}:{addr[1]}, {str(e)}")
+                except json.JSONDecodeError:
+                    log_audit("SECURITY", f"INVALID_JSON, {addr[0]}:{addr[1]}")
+                    raise SecurityException("Invalid JSON format")
+                except KeyError as e:
+                    log_audit("SECURITY", f"MISSING_FIELD, {addr[0]}:{addr[1]}, {str(e)}")
+                    raise SecurityException(f"Missing required field: {str(e)}")
+
+            except socket.timeout:
+                debug_log(f"Connection timeout with {addr}")
+                log_audit("SYSTEM", f"CONNECTION_TIMEOUT, {addr[0]}:{addr[1]}")
+                break
+            except ConnectionResetError:
+                debug_log(f"Connection reset by {addr}")
+                break
+            except SecurityException as e:
+                debug_log(f"Security exception: {str(e)}")
                 break
 
     except Exception as e:
-        debug_log(f"Connection error: {str(e)}")
         log_audit("SYSTEM", f"CONNECTION_ERROR, {addr[0]}:{addr[1]}, {str(e)}")
+        debug_log(f"Error handling client: {str(e)}")
     finally:
-        debug_log(f"Closing connection from {addr}")
         try:
+            # Clean up connection state
+            if username and username in handshake_state:
+                debug_log(f"Cleaning up handshake state for {username}")
+                del handshake_state[username]
+            
+            # Graceful connection shutdown
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # Connection already closed
+            
             conn.close()
-        except:
-            pass
-        log_audit("SYSTEM", f"CONNECTION_CLOSE, {addr[0]}:{addr[1]}")
+            log_audit("SYSTEM", f"CONNECTION_CLOSE, {addr[0]}:{addr[1]}")
+            debug_log(f"Connection with {addr} closed")
+        except Exception as e:
+            debug_log(f"Error during cleanup: {str(e)}")
+
+class SecurityException(Exception):
+    """Custom exception for security violations"""
+    pass
 
 def start_server():
     host = 'localhost'

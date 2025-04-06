@@ -187,83 +187,123 @@ def run_akdp(client, username_param):
     return master_secret
 
 def login_action(client, username):
+    global enc_key, mac_key
     debug_log(f"Starting session for {username}")
-    while True:
-        action = input("\nChoose action [deposit/withdraw/balance/exit]: ").strip().lower()
-        if action == "exit":
-            debug_log("Ending session")
-            break
-        if action not in ["deposit", "withdraw", "balance"]:
-            print("Invalid option")
-            continue
-
-        amount = None
-        if action in ["deposit", "withdraw"]:
-            try:
-                amount = float(input("Amount: $"))
-                if amount <= 0:
-                    print("Amount must be positive")
-                    continue
-            except ValueError:
-                print("Invalid amount")
+    try:
+        while True:
+            action = input("\nChoose action [deposit/withdraw/balance/exit]: ").strip().lower()
+            if action == "exit":
+                debug_log("Ending session")
+                # Clear session keys
+                enc_key = None
+                mac_key = None
+                # Close connection
+                client.close()
+                return False  # Signal that connection is closed
+                
+            if action not in ["deposit", "withdraw", "balance"]:
+                print("Invalid option")
                 continue
 
-        request = {
-            "action": "deposit" if action == "deposit" else 
-                     "withdraw" if action == "withdraw" else 
-                     "check_balance",
-            "username": username,
-            "amount": amount if amount else None
-        }
+            amount = None
+            if action in ["deposit", "withdraw"]:
+                try:
+                    amount = float(input("Amount: $"))
+                    if amount <= 0:
+                        print("Amount must be positive")
+                        continue
+                except ValueError:
+                    print("Invalid amount")
+                    continue
 
-        debug_log(f"Processing {action} request")
-        response = send_request(client, request, enc_key, mac_key)
-        print("\n" + response.get("message", "No response"))
+            request = {
+                "action": "deposit" if action == "deposit" else 
+                         "withdraw" if action == "withdraw" else 
+                         "check_balance",
+                "username": username,
+                "amount": amount if amount else None
+            }
+
+            debug_log(f"Processing {action} request")
+            response = send_request(client, request, enc_key, mac_key)
+            print("\n" + response.get("message", "No response"))
+            
+    except Exception as e:
+        debug_log(f"Session error: {str(e)}")
+        client.close()
+        return False
 
 def handle_user_action(client, action):
-    global username  # Add this line at the start
-    input_username = input("Username: ").strip()  # Use a different variable name
-    password = getpass.getpass("Password: ")
+    global username, enc_key, mac_key
+    try:
+        input_username = input("Username: ").strip()
+        password = getpass.getpass("Password: ")
 
-    request = {
-        "action": action,
-        "username": input_username,
-        "password": password
-    }
+        request = {
+            "action": action,
+            "username": input_username,
+            "password": password
+        }
 
-    response = send_request(client, request, key, None)
+        response = send_request(client, request, key, None)
 
-    if response.get("status") == "success":
-        print("\n" + response.get("message", "Success"))
-        if action == "login":
-            username = input_username  # Assign to global variable
-            if not run_akdp(client, username):
-                print("Security setup failed!")
-                return None
-            login_action(client, username)
-        return client
-    # ... rest of the function ...
+        if response.get("status") == "success":
+            print("\n" + response.get("message", "Success"))
+            if action == "login":
+                username = input_username
+                if not run_akdp(client, username):
+                    print("Security setup failed!")
+                    client.close()
+                    return None
+                # If login_action returns False, connection was closed
+                if login_action(client, username) is False:
+                    return None
+            return client
+        else:
+            print("\n" + response.get("message", "Action failed"))
+            return None
+            
+    except Exception as e:
+        print(f"Connection error: {str(e)}")
+        client.close()
+        return None
 
 def main():
     print("\n=== Secure ATM Client ===")
-    client = connect_to_server()
-    if not client:
-        return
-
+    
     while True:
+        # Create new connection for each iteration
+        client = connect_to_server()
+        if not client:
+            print("Failed to connect to server")
+            continue  # Allow retry instead of exiting
+
         print("\n1. Register\n2. Login\n3. Exit")
         choice = input("Select option (1-3): ").strip()
         
         if choice == "1":
-            client = handle_user_action(client, "register")
+            if not handle_user_action(client, "register"):
+                continue  # Skip to next iteration if failed
         elif choice == "2":
-            client = handle_user_action(client, "login")
+            if not handle_user_action(client, "login"):
+                continue  # Skip to next iteration if failed
         elif choice == "3":
             print("Goodbye!")
-            client.close()
+            if client:
+                client.close()
             break
         else:
             print("Invalid choice")
+            client.close()
+            continue
+        
+        # If we get here, the connection is already closed by login_action
+        # or needs to be closed for register
+        if client:
+            try:
+                client.close()
+            except:
+                pass
 
 if __name__ == "__main__":
     main()
