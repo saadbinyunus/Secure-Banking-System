@@ -1,18 +1,46 @@
-# atm_client.py
-
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog, scrolledtext
+import threading
 import socket
 import json
-from Crypto.Cipher import AES # type: ignore
-from Crypto.Util.Padding import pad, unpad # type: ignore
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 import hashlib
 import base64
 import hmac
 import os
-import tkinter as tk
-from tkinter import messagebox, simpledialog
+import getpass
+# ATM Client with Secure Communication
 
-key = "key"
-psk = b"key"
+import socket
+import json
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import hashlib
+import base64
+import hmac
+import os
+import getpass
+
+# Global variables
+global username
+username = None
+
+# Client configuration
+key = "secure_bank_key_123!"
+psk = b"pre_shared_key_456$"
+
+# Session keys
+enc_key = None
+mac_key = None
+username = None
+
+# Debug settings
+DEBUG = True
+
+def debug_log(message):
+    if DEBUG:
+        print(f"[DEBUG] {message}")
 
 def hmac_sha256(key: bytes, msg: bytes):
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -26,227 +54,268 @@ def to_b64(data):
 def from_b64(data):
     return base64.b64decode(data)
 
-def encrypt(message, key):
-    print(f"Encrypting message: {repr(message)}")
-    key = hashlib.sha256(key.encode()).digest()
-    cipher = AES.new(key, AES.MODE_CBC)
+def derive_keys(master_secret):
+    """Derive encryption and MAC keys from master secret"""
+    debug_log(f"Deriving keys from master secret: {master_secret.hex()[:16]}...")
+    enc_key = hmac_sha256(master_secret, b"encryption" + b"\x00"*28)[:32]
+    mac_key = hmac_sha256(master_secret, b"integrity" + b"\x00"*28)[:32]
+    debug_log(f"Derived enc_key: {enc_key.hex()[:16]}..., mac_key: {mac_key.hex()[:16]}...")
+    return enc_key, mac_key
+
+def encrypt_and_sign(message, enc_key, mac_key):
+    """Encrypt message and generate MAC"""
+    debug_log(f"Encrypting message: {message[:50]}...")
+    cipher = AES.new(enc_key, AES.MODE_CBC)
     ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
-    iv = base64.b64encode(cipher.iv).decode('utf-8')
-    ct = base64.b64encode(ct_bytes).decode('utf-8')
-    return iv + ":" + ct
+    iv = cipher.iv
+    encrypted = base64.b64encode(iv + ct_bytes).decode()
+    
+    mac = hmac_sha256(mac_key, encrypted.encode())
+    mac_b64 = base64.b64encode(mac).decode()
+    debug_log(f"Generated MAC: {mac_b64[:16]}...")
+    
+    return f"{encrypted}:{mac_b64}"
 
-def decrypt(encrypted_message, key):
-    temp_key = hashlib.sha256(key.encode()).digest()
-
-    print(f"Decrypting message: {repr(encrypted_message)}")
+def verify_and_decrypt(encrypted_message, enc_key, mac_key):
+    """Verify MAC and decrypt message"""
+    debug_log("Verifying and decrypting message...")
     try:
-        iv_b64, ct_b64 = encrypted_message.split(":")
-        iv = base64.b64decode(iv_b64)
-        ct = base64.b64decode(ct_b64)
-    except ValueError:
-        raise ValueError("Invalid encrypted message format. Expected 'iv:ct' format.")
-
-    cipher = AES.new(temp_key, AES.MODE_CBC, iv)
-    message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
-    return message
+        encrypted, received_mac_b64 = encrypted_message.split(":")
+        received_mac = base64.b64decode(received_mac_b64)
+        
+        expected_mac = hmac_sha256(mac_key, encrypted.encode())
+        debug_log(f"Received MAC: {received_mac.hex()[:16]}..., Expected: {expected_mac.hex()[:16]}...")
+        
+        if not hmac.compare_digest(received_mac, expected_mac):
+            print("[SECURITY ALERT] MAC verification failed!")
+            return None
+            
+        combined = base64.b64decode(encrypted)
+        iv = combined[:16]
+        ct = combined[16:]
+        cipher = AES.new(enc_key, AES.MODE_CBC, iv)
+        pt = unpad(cipher.decrypt(ct), AES.block_size).decode()
+        debug_log(f"Decrypted message: {pt[:50]}...")
+        
+        return pt
+    except Exception as e:
+        print(f"[SECURITY ERROR] Decryption failed: {str(e)}")
+        return None
 
 def connect_to_server():
     host = 'localhost'
-    port = 1
+    port = 5555
+
     try:
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client.settimeout(5)
         client.connect((host, port))
+        debug_log("Connected to server")
         return client
     except ConnectionRefusedError:
-        print("Connection refused. Is the server running?")
+        print("Server unavailable. Please try later.")
+        return None
+    except Exception as e:
+        print(f"Connection error: {str(e)}")
         return None
 
-def send_request(client, request, key):
+def send_request(client, request, enc_key=None, mac_key=None):
+    debug_log(f"Preparing {request['action']} request")
     try:
-        encrypted_request = encrypt(json.dumps(request), key)
-        client.send(encrypted_request.encode())
+        if enc_key is None or mac_key is None:
+            debug_log("Using pre-shared key")
+            temp_enc_key = hashlib.sha256(key.encode()).digest()
+            temp_mac_key = hashlib.sha256(key.encode()).digest()
+        else:
+            debug_log("Using session keys")
+            temp_enc_key = enc_key
+            temp_mac_key = mac_key
 
+        secured_request = encrypt_and_sign(json.dumps(request), temp_enc_key, temp_mac_key)
+        debug_log(f"Sending request (length: {len(secured_request)})")
+        client.send(secured_request.encode())
+        
         response = client.recv(1024).decode()
-        # print(f"From server: {repr(response)}")
         if not response:
-            raise ValueError("Empty response from server.")
-        decrypted_response = decrypt(response, key)
+            debug_log("Empty server response")
+            raise ValueError("Empty response")
+
+        debug_log(f"Received response (length: {len(response)})")
+        decrypted_response = verify_and_decrypt(response, temp_enc_key, temp_mac_key)
+        if not decrypted_response:
+            raise ValueError("Invalid server response")
+            
         return json.loads(decrypted_response)
-    except Exception:
-        print("Error communicating with server.")
+    except Exception as e:
+        print(f"Error: {str(e)}")
         return {"status": "error", "message": "Server communication error."}
 
-def run_akdp(client, username):
+def run_akdp(client, username_param):
+    global username  # Add this line
+    username = username_param  # Use a different parameter name to avoid shadowing
+    debug_log("Starting AKDP protocol")
+    # ... rest of the function remains the same ...
     nonce1 = generate_nonce()
+    debug_log(f"Generated nonce1: {to_b64(nonce1)}")
+
     step1 = {
         "action": "akdp_step1",
         "username": username,
         "nonce1": to_b64(nonce1)
     }
-    response = send_request(client, step1, key)
+    response = send_request(client, step1, key, None)
 
     nonce2 = from_b64(response["nonce2"])
     server_hmac = from_b64(response["server_hmac"])
+    debug_log(f"Received nonce2: {response['nonce2']}")
+    debug_log(f"Received server_hmac: {response['server_hmac'][:16]}...")
 
     expected_hmac = hmac_sha256(psk, nonce1 + nonce2 + b"SERVER")
-    if server_hmac != expected_hmac:
+    debug_log(f"Verifying server HMAC...")
+    debug_log(f"Expected: {expected_hmac.hex()[:16]}..., Received: {server_hmac.hex()[:16]}...")
+
+    if not hmac.compare_digest(server_hmac, expected_hmac):
+        print("Server authentication failed!")
         return None
 
+    global enc_key, mac_key
     master_secret = hmac_sha256(psk, nonce1 + nonce2)
+    enc_key, mac_key = derive_keys(master_secret)
+
     confirm = hmac_sha256(master_secret, b"CONFIRM")
+    debug_log(f"Sending confirmation HMAC: {confirm.hex()[:16]}...")
 
     step3 = {
         "action": "akdp_confirm",
         "username": username,
         "client_hmac": to_b64(confirm)
     }
-    send_request(client, step3, key)
+    response = send_request(client, step3, key, None)
+
+    debug_log("AKDP completed successfully!")
+    debug_log(f"Master Secret: {master_secret.hex()[:16]}...")
+    debug_log(f"Encryption Key: {enc_key.hex()[:16]}...")
+    debug_log(f"MAC Key: {mac_key.hex()[:16]}...")
     return master_secret
 
-def login(client, username, password):
-    request = {
-        "action": "login",
-        "username": username,
-        "password": password
-    }
-    response = send_request(client, request, key)
-    return response
+def login_action(client, username):
+    global enc_key, mac_key
+    debug_log(f"Starting session for {username}")
+    try:
+        while True:
+            action = input("\nChoose action [deposit/withdraw/balance/exit]: ").strip().lower()
+            if action == "exit":
+                debug_log("Ending session")
+                # Clear session keys
+                enc_key = None
+                mac_key = None
+                # Close connection
+                client.close()
+                return False  # Signal that connection is closed
+                
+            if action not in ["deposit", "withdraw", "balance"]:
+                print("Invalid option")
+                continue
 
-def register(client, username, password):
-    request = {
-        "action": "register",
-        "username": username,
-        "password": password
-    }
-    response = send_request(client, request, key)
-    return response
+            amount = None
+            if action in ["deposit", "withdraw"]:
+                try:
+                    amount = float(input("Amount: $"))
+                    if amount <= 0:
+                        print("Amount must be positive")
+                        continue
+                except ValueError:
+                    print("Invalid amount")
+                    continue
 
-def handle_action(client, username, action, amount=None):
-    request = {
-        "action": action,
-        "username": username,
-        "amount": amount
-    }
-    return send_request(client, request, key)
+            request = {
+                "action": "deposit" if action == "deposit" else 
+                         "withdraw" if action == "withdraw" else 
+                         "check_balance",
+                "username": username,
+                "amount": amount if amount else None
+            }
 
-""" 
-GUI STARTS HERE ---------------------------------------
-"""
-class GUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Secure Banking System - ATM Client")
-        self.root.geometry("500x500")
-        self.client = connect_to_server()
-        if not self.client:
-            messagebox.showerror("Connection Error", "Unable to connect to the server.")
-            root.destroy()
-            return
+            debug_log(f"Processing {action} request")
+            response = send_request(client, request, enc_key, mac_key)
+            print("\n" + response.get("message", "No response"))
+            
+    except Exception as e:
+        debug_log(f"Session error: {str(e)}")
+        client.close()
+        return False
 
-        self.username = None
-        self.main_screen()
+def handle_user_action(client, action):
+    global username, enc_key, mac_key
+    try:
+        input_username = input("Username: ").strip()
+        password = getpass.getpass("Password: ")
 
-    def main_screen(self):
-        for widget in self.root.winfo_children():
-            widget.destroy()
+        request = {
+            "action": action,
+            "username": input_username,
+            "password": password
+        }
 
-        tk.Label(self.root, text="ATM", font=("Arial", 16)).pack(pady=10)
-        tk.Button(self.root, text="Register", width=20, command=self.register_screen).pack(pady=5)
-        tk.Button(self.root, text="Login", width=20, command=self.login_screen).pack(pady=5)
-        tk.Button(self.root, text="Exit", width=20, command=self.root.quit).pack(pady=5)
+        response = send_request(client, request, key, None)
 
-    def register_screen(self):
-        def on_submit():
-            entered_username = username_entry.get()
-            entered_password = password_entry.get()
-            if entered_username and entered_password:
-                top.destroy()
-                response = register(self.client, entered_username, entered_password)
-                messagebox.showinfo("Registration", response.get("message", "No response"))
-                self.client = connect_to_server()
-            else:
-                messagebox.showerror("Registration Failed", "Need username and password.")
+        if response.get("status") == "success":
+            print("\n" + response.get("message", "Success"))
+            if action == "login":
+                username = input_username
+                if not run_akdp(client, username):
+                    print("Security setup failed!")
+                    client.close()
+                    return None
+                # If login_action returns False, connection was closed
+                if login_action(client, username) is False:
+                    return None
+            return client
+        else:
+            print("\n" + response.get("message", "Action failed"))
+            return None
+            
+    except Exception as e:
+        print(f"Connection error: {str(e)}")
+        client.close()
+        return None
 
-        top = tk.Toplevel(self.root)
-        top.title("Register")
-        top.grab_set()
+def main():
+    print("\n=== Secure ATM Client ===")
+    
+    while True:
+        # Create new connection for each iteration
+        client = connect_to_server()
+        if not client:
+            print("Failed to connect to server")
+            continue  # Allow retry instead of exiting
 
-        tk.Label(top, text="Username:").grid(row=0, column=0, padx=10, pady=5)
-        username_entry = tk.Entry(top)
-        username_entry.grid(row=0, column=1, padx=10, pady=5)
-
-        tk.Label(top, text="Password:").grid(row=1, column=0, padx=10, pady=5)
-        password_entry = tk.Entry(top, show="*")
-        password_entry.grid(row=1, column=1, padx=10, pady=5)
-
-        submit_btn = tk.Button(top, text="Register", command=on_submit)
-        submit_btn.grid(row=2, column=0, columnspan=2, pady=10)
-
-        username_entry.focus_set()
-
-    def login_screen(self):
-        def on_submit():
-            entered_username = username_entry.get()
-            entered_password = password_entry.get()
-            if entered_username and entered_password:
-                top.destroy()
-                response = login(self.client, entered_username, entered_password)
-                if response.get("status") == "success":
-                    self.username = entered_username
-                    run_akdp(self.client, entered_username)
-                    self.dashboard()
-                else:
-                    messagebox.showerror("Login Failed", response.get("message"))
-            else:
-                messagebox.showerror("Error", "Both fields are required.")
-
-        top = tk.Toplevel(self.root)
-        top.title("Login")
-        top.grab_set()
-
-        tk.Label(top, text="Username:").grid(row=0, column=0, padx=10, pady=5)
-        username_entry = tk.Entry(top)
-        username_entry.grid(row=0, column=1, padx=10, pady=5)
-
-        tk.Label(top, text="Password:").grid(row=1, column=0, padx=10, pady=5)
-        password_entry = tk.Entry(top, show="*")
-        password_entry.grid(row=1, column=1, padx=10, pady=5)
-
-        submit_btn = tk.Button(top, text="Login", command=on_submit)
-        submit_btn.grid(row=2, column=0, columnspan=2, pady=10)
-
-        username_entry.focus_set()
-
-    def dashboard(self):
-        for widget in self.root.winfo_children():
-            widget.destroy()
-
-        tk.Label(self.root, text=f"Welcome {self.username}", font=("Arial", 14)).pack(pady=10)
-        tk.Button(self.root, text="Deposit", width=20, command=lambda: self.action("deposit")).pack(pady=5)
-        tk.Button(self.root, text="Withdraw", width=20, command=lambda: self.action("withdraw")).pack(pady=5)
-        tk.Button(self.root, text="Check Balance", width=20, command=lambda: self.action("check_balance")).pack(pady=5)
-        tk.Button(self.root, text="Logout", width=20, command=self.logout).pack(pady=5)
-
-    def action(self, action):
-        amount = None
-        if action in ["deposit", "withdraw"]:
+        print("\n1. Register\n2. Login\n3. Exit")
+        choice = input("Select option (1-3): ").strip()
+        
+        if choice == "1":
+            if not handle_user_action(client, "register"):
+                continue  # Skip to next iteration if failed
+        elif choice == "2":
+            if not handle_user_action(client, "login"):
+                continue  # Skip to next iteration if failed
+        elif choice == "3":
+            print("Goodbye!")
+            if client:
+                client.close()
+            break
+        else:
+            print("Invalid choice")
+            client.close()
+            continue
+        
+        # If we get here, the connection is already closed by login_action
+        # or needs to be closed for register
+        if client:
             try:
-                amount = float(simpledialog.askstring(action.title(), "Enter amount:"))
-            except (TypeError, ValueError):
-                messagebox.showerror("Invalid Input", "Please enter a valid number.")
-                return
-
-        response = handle_action(self.client, self.username, action, amount)
-        messagebox.showinfo(action.title(), response.get("message", "No response"))
-
-    def logout(self):
-        self.username = None
-        self.client = connect_to_server()
-        self.main_screen()
+                client.close()
+            except:
+                pass
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.geometry("300x300")
-    app = GUI(root)
-    root.mainloop()
+    main()
