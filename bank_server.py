@@ -18,7 +18,6 @@ bank_server_key = "secure_bank_key_123!"
 psk = b"pre_shared_key_456$"
 handshake_state = {}
 
-
 # Debug settings
 DEBUG = True
 
@@ -224,6 +223,7 @@ def handle_login(username, password):
                     return {"status": "fail", "message": "INVALID."}
 
         if username in customers and bcrypt.checkpw(password.encode(), customers[username]["password"].encode()):
+            active_users.add(username)
             log_audit(username, "logged in")
             return {"status": "success", "message": "Login successful"}
         return {"status": "fail", "message": "Invalid credentials"}
