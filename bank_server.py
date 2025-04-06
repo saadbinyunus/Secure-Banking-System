@@ -1,9 +1,10 @@
+# Bank Server with Secure Key Exchange and Audit Logging
+
 import socket
 import threading
 import json
 import logging
 import bcrypt
-from cryptography.fernet import Fernet
 from datetime import datetime
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
@@ -12,10 +13,17 @@ import hashlib
 import hmac
 import os
 
-bank_server_key = "key"
-# cipher = Fernet(bank_server_key)
-psk = b"key"
+# Server configuration
+bank_server_key = "secure_bank_key_123!"
+psk = b"pre_shared_key_456$"
 handshake_state = {}
+
+# Debug settings
+DEBUG = True
+
+def debug_log(message):
+    if DEBUG:
+        print(f"[DEBUG] {message}")
 
 def hmac_sha256(key: bytes, msg: bytes):
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -29,111 +37,102 @@ def to_b64(data):
 def from_b64(data):
     return base64.b64decode(data)
 
+def derive_keys(master_secret):
+    """Derive encryption and MAC keys from master secret"""
+    debug_log(f"Deriving keys from master secret: {master_secret.hex()[:16]}...")
+    enc_key = hmac_sha256(master_secret, b"encryption" + b"\x00"*28)[:32]
+    mac_key = hmac_sha256(master_secret, b"integrity" + b"\x00"*28)[:32]
+    debug_log(f"Derived enc_key: {enc_key.hex()[:16]}..., mac_key: {mac_key.hex()[:16]}...")
+    return enc_key, mac_key
+
+def encrypt_and_sign(message, enc_key, mac_key):
+    """Encrypt message and generate MAC"""
+    debug_log(f"Encrypting message: {message[:50]}...")
+    cipher = AES.new(enc_key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
+    iv = cipher.iv
+    encrypted = base64.b64encode(iv + ct_bytes).decode()
+    
+    mac = hmac_sha256(mac_key, encrypted.encode())
+    mac_b64 = base64.b64encode(mac).decode()
+    debug_log(f"Generated MAC: {mac_b64[:16]}...")
+    
+    return f"{encrypted}:{mac_b64}"
+
+def verify_and_decrypt(encrypted_message, enc_key, mac_key):
+    """Verify MAC and decrypt message"""
+    debug_log("Verifying and decrypting message...")
+    try:
+        encrypted, received_mac_b64 = encrypted_message.split(":")
+        received_mac = base64.b64decode(received_mac_b64)
+        
+        expected_mac = hmac_sha256(mac_key, encrypted.encode())
+        debug_log(f"Received MAC: {received_mac.hex()[:16]}..., Expected: {expected_mac.hex()[:16]}...")
+        
+        if not hmac.compare_digest(received_mac, expected_mac):
+            print("[SECURITY ALERT] MAC verification failed!")
+            return None
+            
+        combined = base64.b64decode(encrypted)
+        iv = combined[:16]
+        ct = combined[16:]
+        cipher = AES.new(enc_key, AES.MODE_CBC, iv)
+        pt = unpad(cipher.decrypt(ct), AES.block_size).decode()
+        debug_log(f"Decrypted message: {pt[:50]}...")
+        
+        return pt
+    except Exception as e:
+        print(f"[SECURITY ERROR] Decryption failed: {str(e)}")
+        return None
+
+# Simulated database
 customers = {
-    "timmy ngo": {
-        "password": bcrypt.hashpw("123".encode(), bcrypt.gensalt()).decode(),
+    "alice": {
+        "password": bcrypt.hashpw("alice123".encode(), bcrypt.gensalt()).decode(),
         "balance": 1000,
-        "transactions": ["deposit 100", "withdraw 20"]
+        "transactions": []
+    },
+    "bob": {
+        "password": bcrypt.hashpw("bob456".encode(), bcrypt.gensalt()).decode(),
+        "balance": 500,
+        "transactions": []
     }
-} # Simulated in-memory database for user accounts
+}
 
 lock = threading.Lock()
 
-# Audit log configuration
-logging.basicConfig(
-    filename="audit.log",
-    level=logging.INFO,
-    format="%(message)s"
-)
+# Replace the logging.basicConfig with:
+if not os.path.exists("audit.log"):
+    with open("audit.log", "w") as f:
+        f.write("")  # Initialize empty encrypted log file
 
-# Security protocols
-def encrypt(message):
-    if not isinstance(message, str):
-        message = json.dumps(message)
-
-    print(f"Encrypting message: {repr(message)}")
-    key = hashlib.sha256(bank_server_key.encode()).digest()
-    cipher = AES.new(key, AES.MODE_CBC)
-    ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
-    iv_b64 = base64.b64encode(cipher.iv).decode('utf-8')
-    ct_b64 = base64.b64encode(ct_bytes).decode('utf-8')
-
-    encrypted_message = f"{iv_b64}:{ct_b64}"
-    print(f"Encrypted message: {repr(encrypted_message)}")
-    return encrypted_message
-
-
-def decrypt(encrypted_message):
-    try:
-        print(f"Encrypted message: {repr(encrypted_message)}")
-        iv_b64, ct_b64 = encrypted_message.split(":")
-        iv = base64.b64decode(iv_b64)
-        ct = base64.b64decode(ct_b64)
-
-        key = hashlib.sha256(bank_server_key.encode()).digest()
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        decrypted_message = unpad(cipher.decrypt(ct), AES.block_size).decode('utf-8')
-
-        print(f"Decrypted message: {repr(decrypted_message)}")
-        return decrypted_message
-    except Exception as e:
-        print(f"[ERROR] Decryption failed: {e}")
-        return ""
-    
+if not os.path.exists("audit_decrypt.log"):
+    with open("audit_decrypt.log", "w") as f:
+        f.write("Customer_ID, Action, Timestamp\n")  # Plaintext header
 
 def log_audit(customer_id, action):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"{customer_id}, {action}, {timestamp}"
-    encrypted_log = encrypt(log_entry)
+    
+    # Get appropriate keys
+    if customer_id in handshake_state and handshake_state[customer_id].get("authenticated"):
+        enc_key = handshake_state[customer_id]["enc_key"]
+        mac_key = handshake_state[customer_id]["mac_key"]
+        debug_log(f"Using derived keys for {customer_id}")
+    else:
+        enc_key = hashlib.sha256(bank_server_key.encode()).digest()
+        mac_key = hashlib.sha256(bank_server_key.encode()).digest()
+        debug_log("Using pre-shared key for audit")
 
-    with open("audit.log", "a") as log_file:
-        log_file.write(encrypted_log + "\n")
+    encrypted_log = encrypt_and_sign(log_entry, enc_key, mac_key)
+    debug_log(f"Audit entry encrypted: {encrypted_log[:100]}...")
 
-def hash(message):
-    return bcrypt.hashpw(message.encode(), bcrypt.gensalt()).decode()
-
-def verify_hash(message, hashed):
-    return bcrypt.checkpw(message.encode(), hashed.encode())
-
-def handle_client(conn, addr):
-    logging.info(f"New connection from {addr}")
-    print(f"[NEW CONNECTION] {addr} connected.")
-
-    try:
-        while True:
-            data = conn.recv(1024).decode()
-            if not data:
-                print(f"[DISCONNECTED] {addr} disconnected.")
-                break
-
-            print(f"[RECEIVED] {repr(data)} from {addr}")
-
-            # Decrypt data to parse the JSON
-            decrypted_data = decrypt(data)
-            if not decrypted_data:
-                print(f"[ERROR] Failed to decrypt data from {addr}.")
-                conn.send(encrypt(json.dumps({"status": "fail", "message": "Decryption failed."})).encode())
-                return
-            
-            print(f"[DECRYPTED] {repr(decrypted_data)} from {addr}")
-
-            # Parse the incoming JSON data
-            request = json.loads(decrypted_data)
-            action = request.get("action")
-            username = request.get("username")
-            password = request.get("password")
-
-            response = handle_action(action, username, password, request)
-            response_message = json.dumps(response)
-            encrypted_response = encrypt(response_message)
-
-            print(f"[SENDING] {repr(encrypted_response)} to {addr}")
-
-            conn.send(encrypted_response.encode())
-    except Exception as e:
-        print(f"[ERROR] {e}")
-    finally:
-        conn.close()
+    with open("audit.log", "a") as encrypted_file:
+        encrypted_file.write(encrypted_log + "\n")
+    
+    # Write to decrypted log
+    with open("audit_decrypt.log", "a") as decrypted_file:
+        decrypted_file.write(log_entry + "\n")
 
 def handle_action(action, username, password, request):
     if action == "register":
@@ -149,88 +148,171 @@ def handle_action(action, username, password, request):
     elif action == "akdp_step1":
         nonce1 = from_b64(request["nonce1"])
         nonce2 = generate_nonce()
-        handshake_state[username] = {"nonce1": nonce1, "nonce2": nonce2}
+        handshake_state[username] = {
+            "nonce1": nonce1, 
+            "nonce2": nonce2,
+            "conn": request.get("conn")
+        }
         server_hmac = hmac_sha256(psk, nonce1 + nonce2 + b"SERVER")
 
-        print(f"[AKDP] Step 1 from {username}")
+        debug_log(f"AKDP Step 1 from {username}")
         return {
             "action": "akdp_step2",
             "nonce2": to_b64(nonce2),
             "server_hmac": to_b64(server_hmac)
         }
-
     elif action == "akdp_confirm":
+        debug_log(f"Received AKDP confirmation from {username}")
         client_hmac = from_b64(request["client_hmac"])
         state = handshake_state.get(username)
         if not state:
+            debug_log("No handshake state for user")
             return {"status": "fail", "message": "Missing handshake"}
 
         nonce1, nonce2 = state["nonce1"], state["nonce2"]
         master_secret = hmac_sha256(psk, nonce1 + nonce2)
         expected = hmac_sha256(master_secret, b"CONFIRM")
+        debug_log(f"Client HMAC: {client_hmac.hex()[:16]}..., Expected: {expected.hex()[:16]}...")
 
-        if client_hmac != expected:
+        if not hmac.compare_digest(client_hmac, expected):
+            debug_log("Client HMAC verification failed!")
             return {"status": "fail", "message": "Client verification failed"}
 
-        print(f"[AKDP] Key exchange complete for {username}")
+        enc_key, mac_key = derive_keys(master_secret)
+        state.update({
+            "enc_key": enc_key,
+            "mac_key": mac_key,
+            "authenticated": True
+        })
+        debug_log(f"AKDP complete for {username}")
         return {"status": "success", "message": "Key exchange complete"}
-
     else:
-        logging.error(f"Unknown action: {action}")
         return {"status": "fail", "message": "Unknown action."}
 
 def handle_register(username, password):
     with lock:
-        logging.info(f"Registration attempt for user: {username}")
+        debug_log(f"Registration attempt for {username}")
         if username in customers:
-            logging.warning(f"Registration failed for user: {username} - Username already exists.")
-            return {"status": "fail", "message": "Username already exists."}
+            return {"status": "fail", "message": "Username exists"}
         customers[username] = {
-            "password": hash(password),
+            "password": bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
             "balance": 0,
             "transactions": []
         }
-        logging.info(f"Username {username} registered successfully.")
-        return {"status": "success", "message": "Registration successful."}
+        log_audit(username, "registered")
+        return {"status": "success", "message": "Registration successful"}
 
 def handle_login(username, password):
     with lock:
-        logging.info(f"Login attempt for user: {username}")
-        if username in customers and verify_hash(password, customers[username]["password"]):
-            logging.info(f"User {username} logged in successfully.")
-            return {"status": "success", "message": "Login successful."}
-        logging.warning(f"Failed login attempt for user: {username}")
-        return {"status": "fail", "message": "Invalid credentials."}
+        debug_log(f"Login attempt for {username}")
+        if username in customers and bcrypt.checkpw(password.encode(), customers[username]["password"].encode()):
+            log_audit(username, "logged in")
+            return {"status": "success", "message": "Login successful"}
+        return {"status": "fail", "message": "Invalid credentials"}
 
 def handle_deposit(username, amount):
     if not isinstance(amount, (int, float)) or amount <= 0:
-        return {"status": "fail", "message": "Invalid deposit amount."}
+        log_audit(username, "DEPOSIT_FAILED, Invalid amount")
+        return {"status": "fail", "message": "Invalid amount"}
+    
     with lock:
         if username in customers:
             customers[username]["balance"] += amount
             customers[username]["transactions"].append(f"deposit {amount}")
-            log_audit(username, f"deposit {amount}")
+            log_audit(username, f"DEPOSIT_SUCCESS, {amount}, NewBalance:{customers[username]['balance']}")
             return {"status": "success", "message": f"Deposited ${amount}. New balance: ${customers[username]['balance']}"}
-    return {"status": "fail", "message": "Username not found."}
+    
+    log_audit(username, "DEPOSIT_FAILED, User not found")
+    return {"status": "fail", "message": "User not found"}
 
 def handle_withdraw(username, amount):
     if not isinstance(amount, (int, float)) or amount <= 0:
-        return {"status": "fail", "message": "Invalid withdrawal amount."}
-    with lock:    
+        return {"status": "fail", "message": "Invalid amount"}
+    with lock:
         if username in customers and customers[username]["balance"] >= amount:
             customers[username]["balance"] -= amount
             customers[username]["transactions"].append(f"withdraw {amount}")
             log_audit(username, f"withdraw {amount}")
             return {"status": "success", "message": f"Withdrew ${amount}. New balance: ${customers[username]['balance']}"}
-    return {"status": "fail", "message": "Invalid withdrawal request."}
+    return {"status": "fail", "message": "Invalid withdrawal"}
 
 def handle_check_balance(username):
     with lock:
         if username in customers:
             balance = customers[username]["balance"]
-            log_audit(username, "Balance Inquiry")
-            return {"status": "success", "message": f"Your balance is ${balance}."}
-    return {"status": "fail", "message": "User not found."}
+            log_audit(username, "balance inquiry")
+            return {"status": "success", "message": f"Balance: ${balance}"}
+    return {"status": "fail", "message": "User not found"}
+
+def handle_client(conn, addr):
+    debug_log(f"New connection from {addr}")
+    log_audit("SYSTEM", f"CONNECTION_OPEN, {addr[0]}:{addr[1]}")
+    username = None
+    
+    try:
+        while True:
+            data = conn.recv(1024).decode()
+            if not data:
+                debug_log(f"{addr} disconnected")
+                break
+
+            debug_log(f"Received raw data: {data[:100]}...")
+
+            # Reset username for each new message
+            current_username = None
+            enc_key = hashlib.sha256(bank_server_key.encode()).digest()
+            mac_key = hashlib.sha256(bank_server_key.encode()).digest()
+            debug_log("Defaulting to pre-shared key")
+
+            try:
+                # First try with pre-shared key (for new connections)
+                decrypted_data = verify_and_decrypt(data, enc_key, mac_key)
+                if decrypted_data:
+                    request = json.loads(decrypted_data)
+                    current_username = request.get("username")
+                    
+                    # For existing sessions, try with session keys if available
+                    if (current_username and 
+                        current_username in handshake_state and
+                        handshake_state[current_username].get("authenticated") and
+                        handshake_state[current_username].get("conn") == conn and
+                        request.get("action") not in ["register", "login", "akdp_step1"]):
+                        
+                        enc_key = handshake_state[current_username]["enc_key"]
+                        mac_key = handshake_state[current_username]["mac_key"]
+                        debug_log(f"Switched to session keys for {current_username}")
+                        # Re-decrypt with session keys
+                        decrypted_data = verify_and_decrypt(data, enc_key, mac_key)
+                        if not decrypted_data:
+                            raise ValueError("Session key decryption failed")
+
+                    request = json.loads(decrypted_data)
+                    request["conn"] = conn
+                    username = current_username
+
+                    response = handle_action(request["action"], username, 
+                                          request.get("password"), request)
+                    response_message = json.dumps(response)
+                    secured_response = encrypt_and_sign(response_message, enc_key, mac_key)
+                    conn.send(secured_response.encode())
+                else:
+                    raise ValueError("Initial decryption failed")
+
+            except Exception as e:
+                debug_log(f"Message handling error: {str(e)}")
+                log_audit("SYSTEM", f"MESSAGE_ERROR, {addr[0]}:{addr[1]}, {str(e)}")
+                break
+
+    except Exception as e:
+        debug_log(f"Connection error: {str(e)}")
+        log_audit("SYSTEM", f"CONNECTION_ERROR, {addr[0]}:{addr[1]}, {str(e)}")
+    finally:
+        debug_log(f"Closing connection from {addr}")
+        try:
+            conn.close()
+        except:
+            pass
+        log_audit("SYSTEM", f"CONNECTION_CLOSE, {addr[0]}:{addr[1]}")
 
 def start_server():
     host = 'localhost'
@@ -239,13 +321,13 @@ def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((host, port))
     server.listen()
-    print(f"[LISTENING] Server is listening on {host}:{port}")
+    print(f"[SERVER] Listening on {host}:{port}")
 
     while True:
         conn, addr = server.accept()
         thread = threading.Thread(target=handle_client, args=(conn, addr))
         thread.start()
-        print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+        debug_log(f"Active connections: {threading.active_count() - 1}")
 
 if __name__ == "__main__":
     start_server()
