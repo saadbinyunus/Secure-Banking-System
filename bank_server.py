@@ -220,7 +220,7 @@ def handle_login(username, password):
         debug_log(f"Login attempt for {username}")
         if username in active_users:
                     logging.warning(f"User {username} already logged in.")
-                    return {"status": "fail", "message": "INVALID."}
+                    return {"status": "fail", "message": "User already logged in on another instance of the ATM."}
 
         if username in customers and bcrypt.checkpw(password.encode(), customers[username]["password"].encode()):
             active_users.add(username)
