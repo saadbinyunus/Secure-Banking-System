@@ -18,6 +18,17 @@ import sys
 bank_server_key = "key"
 psk = b"key"
 handshake_state = {}
+<<<<<<< Updated upstream
+=======
+
+
+# Debug settings
+DEBUG = True
+
+def debug_log(message):
+    if DEBUG:
+        print(f"[DEBUG] {message}")
+>>>>>>> Stashed changes
 
 def hmac_sha256(key: bytes, msg: bytes):
     return hmac.new(key, msg, hashlib.sha256).digest()
@@ -31,6 +42,68 @@ def to_b64(data):
 def from_b64(data):
     return base64.b64decode(data)
 
+<<<<<<< Updated upstream
+=======
+def logout(username):
+    with lock:
+        if username in active_users:
+            active_users.remove(username)
+            logging.info(f"User {username} logged out.")
+            return {"status": "success", "message": "Logged out successfully."}
+        else:
+            logging.warning(f"Logout attempt for user {username} who is not logged in.")
+            return {"status": "fail", "message": "User not logged in."}
+
+def derive_keys(master_secret):
+    """Derive encryption and MAC keys from master secret"""
+    debug_log(f"Deriving keys from master secret: {master_secret.hex()[:16]}...")
+    enc_key = hmac_sha256(master_secret, b"encryption" + b"\x00"*28)[:32]
+    mac_key = hmac_sha256(master_secret, b"integrity" + b"\x00"*28)[:32]
+    debug_log(f"Derived enc_key: {enc_key.hex()[:16]}..., mac_key: {mac_key.hex()[:16]}...")
+    return enc_key, mac_key
+
+def encrypt_and_sign(message, enc_key, mac_key):
+    """Encrypt message and generate MAC"""
+    debug_log(f"Encrypting message: {message[:50]}...")
+    cipher = AES.new(enc_key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(message.encode(), AES.block_size))
+    iv = cipher.iv
+    encrypted = base64.b64encode(iv + ct_bytes).decode()
+    
+    mac = hmac_sha256(mac_key, encrypted.encode())
+    mac_b64 = base64.b64encode(mac).decode()
+    debug_log(f"Generated MAC: {mac_b64[:16]}...")
+    
+    return f"{encrypted}:{mac_b64}"
+
+def verify_and_decrypt(encrypted_message, enc_key, mac_key):
+    """Verify MAC and decrypt message"""
+    debug_log("Verifying and decrypting message...")
+    try:
+        encrypted, received_mac_b64 = encrypted_message.split(":")
+        received_mac = base64.b64decode(received_mac_b64)
+        
+        expected_mac = hmac_sha256(mac_key, encrypted.encode())
+        debug_log(f"Received MAC: {received_mac.hex()[:16]}..., Expected: {expected_mac.hex()[:16]}...")
+        
+        if not hmac.compare_digest(received_mac, expected_mac):
+            print("[SECURITY ALERT] MAC verification failed!")
+            return None
+            
+        combined = base64.b64decode(encrypted)
+        iv = combined[:16]
+        ct = combined[16:]
+        cipher = AES.new(enc_key, AES.MODE_CBC, iv)
+        pt = unpad(cipher.decrypt(ct), AES.block_size).decode()
+        debug_log(f"Decrypted message: {pt[:50]}...")
+        
+        return pt
+    except Exception as e:
+        print(f"[SECURITY ERROR] Decryption failed: {str(e)}")
+        return None
+
+# Simulated database
+>>>>>>> Stashed changes
 customers = {
     "johnsmith416": {
         "password": bcrypt.hashpw("123".encode(), bcrypt.gensalt()).decode(),
@@ -151,7 +224,13 @@ def handle_action(action, username, password, request):
     elif action == "withdraw":
         return withdraw(username, request.get("amount"))
     elif action == "check_balance":
+<<<<<<< Updated upstream
         return check_balance(username)
+=======
+        return handle_check_balance(username)
+    elif action == "logout":
+        return logout(username)
+>>>>>>> Stashed changes
     elif action == "akdp_step1":
         nonce1 = from_b64(request["nonce1"])
         nonce2 = generate_nonce()
@@ -201,10 +280,22 @@ def register(username, password):
 
 def login(username, password):
     with lock:
+<<<<<<< Updated upstream
         logging.info(f"Login attempt for user: {username}")
         if username in active_users:
             logging.warning(f"User {username} already logged in.")
             return {"status": "fail", "message": "INVALID."}
+=======
+        debug_log(f"Login attempt for {username}")
+        if username in active_users:
+                    logging.warning(f"User {username} already logged in.")
+                    return {"status": "fail", "message": "INVALID."}
+
+        if username in customers and bcrypt.checkpw(password.encode(), customers[username]["password"].encode()):
+            log_audit(username, "logged in")
+            return {"status": "success", "message": "Login successful"}
+        return {"status": "fail", "message": "Invalid credentials"}
+>>>>>>> Stashed changes
 
         if username in customers and verify_hash(password, customers[username]["password"]):
             logging.info(f"User {username} logged in successfully.")
