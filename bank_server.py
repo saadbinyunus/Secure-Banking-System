@@ -40,6 +40,7 @@ customers = {
 } # Simulated in-memory database for user accounts
 
 lock = threading.Lock()
+active_users = set() # Set to keep track of active users
 
 # Audit log configuration
 logging.basicConfig(
@@ -134,6 +135,10 @@ def handle_client(conn, addr):
     except Exception as e:
         print(f"[ERROR] {e}")
     finally:
+        with lock:
+            if 'username' in locals() and username in active_users:
+                active_users.remove(username)
+                print(f"[LOGOUT] {username} logged out.")
         conn.close()
 
 def handle_action(action, username, password, request):
@@ -159,7 +164,6 @@ def handle_action(action, username, password, request):
             "nonce2": to_b64(nonce2),
             "server_hmac": to_b64(server_hmac)
         }
-
     elif action == "akdp_confirm":
         client_hmac = from_b64(request["client_hmac"])
         state = handshake_state.get(username)
@@ -175,7 +179,8 @@ def handle_action(action, username, password, request):
 
         print(f"[AKDP] Key exchange complete for {username}")
         return {"status": "success", "message": "Key exchange complete"}
-
+    elif action == "logout":
+        return logout(username)
     else:
         logging.error(f"Unknown action: {action}")
         return {"status": "fail", "message": "Unknown action."}
@@ -197,6 +202,10 @@ def register(username, password):
 def login(username, password):
     with lock:
         logging.info(f"Login attempt for user: {username}")
+        if username in active_users:
+            logging.warning(f"User {username} already logged in.")
+            return {"status": "fail", "message": "INVALID."}
+
         if username in customers and verify_hash(password, customers[username]["password"]):
             logging.info(f"User {username} logged in successfully.")
             return {"status": "success", "message": "Login successful."}
@@ -232,6 +241,16 @@ def check_balance(username):
             log_audit(username, "Balance Inquiry")
             return {"status": "success", "message": f"Your balance is ${balance}."}
     return {"status": "fail", "message": "User not found."}
+
+def logout(username):
+    with lock:
+        if username in active_users:
+            active_users.remove(username)
+            logging.info(f"User {username} logged out.")
+            return {"status": "success", "message": "Logged out successfully."}
+        else:
+            logging.warning(f"Logout attempt for user {username} who is not logged in.")
+            return {"status": "fail", "message": "User not logged in."}
 
 def start_server():
     host = 'localhost'
